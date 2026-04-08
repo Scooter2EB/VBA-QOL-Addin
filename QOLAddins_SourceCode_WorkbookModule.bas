@@ -1,5 +1,5 @@
 '!!!!! NOTE: The code below comes from QOLAddings.xlam. I have included it here so it can be publically viewed but to get the addin working just download the .xlam file instead. This code is located 
-'!!!!! of QOLAddins.xlam.
+'!!!!! Workbook module of QOLAddins.xlam.
 
 Private Sub Workbook_Open()
 
