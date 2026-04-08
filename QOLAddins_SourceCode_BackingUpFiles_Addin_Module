@@ -1,0 +1,923 @@
+'!!!!! NOTE: The code below comes from QOLAddings.xlam. I have included it here so it can be publically viewed but to get the addin working just download the .xlam file instead. This code is located 
+'!!!!!in a module name BackingUpFiles_Addin within the QOLAddins.xlam file.
+
+Dim BackupCount As Byte
+'For use in closing excel instances. Came From: https://stackoverflow.com/questions/30363748/having-multiple-excel-instances-launched-how-can-i-get-the-application-object-f
+Private Declare PtrSafe Function AccessibleObjectFromWindow Lib "oleacc" ( _
+    ByVal hwnd As LongPtr, ByVal dwId As Long, riid As Any, ppvObject As Object) As Long
+Private Declare PtrSafe Function FindWindowExA Lib "user32" ( _
+    ByVal hwndParent As LongPtr, ByVal hwndChildAfter As LongPtr, _
+    ByVal lpszClass As String, ByVal lpszWindow As String) As LongPtr
+Sub SaveWorkbookBackUp()
+'___________________________ Saving a Backup Copy of the Workbook ________________________
+'////// This sub saves a backup copy of the open file in a directory called 'Backups' within said file's \\\\\ _
+/////// existing directory. Each backup copy is named: Filename Backup <Save Date> <(Count of backups that day)> \\\ _
+/////// If the Backups directory does not exist, it will be created. If it cannot be created, it the backup \\\\\ _
+/////// will be saved in the file's current directory.
+'$$$$$$ Setup: Simply Copy and Paste this sub into a VBA Module for a file. You can then run directly or link a button to it. _
+$$$$$$$ There is a required declaration listed below. If you do not setup, the backup counter will always read 1, and _
+$$$$$$$ subsequent backups saved on the same day will overwrite the previous one. Otherwise, the script will work.
+'$$$$$$ Required Declarations: Dim BackUpCount As Byte
+On Error GoTo NoSave
+'%%%%%%%%%%%%%%%%%%%%%%%%% Creating The Counter %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+Application.EnableEvents = False
+Application.ScreenUpdating = False
+Application.Calculation = xlCalculationManual
+
+If Not Left(Application.OperatingSystem, 1) Like "W" Then
+    Var_Slash = "/"
+Else
+    Var_Slash = "\"
+End If
+
+BackupCount = BackupCount + 1 'So you can save more than one backup copy per session
+
+'%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Checking If you want to save the current workbook %%%%%%%%%%%%%%%
+ShouldSave = MsgBox("Would you like to save the current file BEFORE creating a backup?", vbYesNo + vbQuestion, "Save File?")
+If ShouldSave = vbYes Then
+    ActiveWorkbook.Save
+End If
+'%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Checking and Creating File Path %%%%%%%%%%%%%%%%%%%%
+File_Name = Split(ActiveWorkbook.Name, ".")
+File_Ext = "." & File_Name(UBound(File_Name))
+File_Name = Left(ActiveWorkbook.Name, Len(ActiveWorkbook.Name) - Len(File_Ext))
+File_Path = ActiveWorkbook.path & Var_Slash & "Backups" & Var_Slash
+File_PathCheck = Dir(File_Path, vbDirectory)
+If File_PathCheck = "" Then
+    On Error GoTo No_Permission
+    MkDir (File_Path)
+End If
+If 1 = 2 Then
+No_Permission:
+On Error GoTo -1: On Error GoTo NoSave
+    NoSave = MsgBox("Unfortunately, the custom file path '" & File_Path & "' does not currently exist on this " & _
+                  "computer AND excel does not have permission to create said folder. Until one of these " & _
+                  "two conditions are changed, all backups will be saved in the same folder as this file.", vbOKOnly + vbInformation, "No Backup Folder Available")
+                  
+    File_Path = ActiveWorkbook.path & Var_Slash
+End If
+'%%%%%%%%%%%%%%%%%%%%%%%%%%%% Creating a Filename and checking the path length %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+BackupName = File_Path & File_Name & " Backup " & Format(CDate(Now()), "dd-mmm-yyyy") & " (" & BackupCount & ")" & File_Ext
+If Len(BackupName) >= 255 Then
+    TooLong = MsgBox("Issue: The Current file path and file name for you back up, whic is: " & vbNewLine & vbNewLine & _
+                   BackupName & vbNewLine & vbNewLine & "exceeds windows built in length limit of 255 characters." & vbNewLine & _
+                   "The backup will now be saved in the folder of the current directory instead", vbOKOnly + vbInformation, "File Path and Name Too Long")
+    
+    File_Path = ActiveWorkbook.path & Var_Slach
+    BackupName = File_Path & File_Name & " Backup " & Format(CDate(Now()), "dd-mmm-yyyy") & " (" & BackupCount & ")" & File_Ext
+End If
+'%%%%%%%%%%%%%%%%%%%%%%%%% Saving Backup %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+ActiveWorkbook.SaveCopyAs fileName:=BackupName
+
+If 1 = 2 Then
+NoSave:
+    NoBackUp = MsgBox("For Some Reason, generating a backupcopy failed. It might have something to do with " & _
+                    "folder permissions.", vbOKOnly + vbInformation, "Error: Could Not Create Backup")
+    BackupCount = BackupCount - 1
+Else
+    BackUp_msg = MsgBox("Congratulations! You have created a backup file! I am so proud of you! Your backup copy " & _
+                  " is saved at " & BackupName, vbOKOnly + vbInformation, "You ain't neva gonna lose yo work now")
+End If
+Application.EnableEvents = True
+Application.ScreenUpdating = True
+Application.Calculation = xlCalculationAutomatic
+End Sub
+Sub Save_And_Close_All_Workbooks_Except_This_One()
+'_______________________________ Saving and Closing all Excel Files Except the Current One ___________________
+'///////////////////// This script goes through the computer and checks for each excel file that is open\\\\\\ _
+//////////////////// verifies that it is not this one and then closes them. Has some tools to address \\\\\\\\ _
+////////////////// Some interesting complications that occur when attempting to do this. Listed Below. \\\\\\\
+
+'((((((((((((((((((((( Background on Finding and Closing Excel; Instances vs Files; lingering VBA projects )))))
+'Finding and closing all open excel files is not as straight forward as it seems because multiple excel files may _
+or may not be open under the same INSTANCE (may not be the correct term but I am using it) of excel. An Instance _
+of excel is a single version of the Excel application being open. In the windows task manager it is represented _
+as one instance of excel. If you have multiple files open under that instance, you can see them in the drop-down _
+below that instance. It is effectively multiple files being run and managed by a single version of the excel application. _
+You will notice in VBA each of the files will show in the project window, and when copypasting between files you _
+will have full access to the different types of pasting (i.e. Values, formulas, formats etc.). If you already have _
+an excel file open, and you open up another excel file through the open file (from menu, script, etc.), they will _
+open in the same instance. However, if you open up your files through File Explorer, they will TYPICALLY open _
+up in separate instances of excel
+'When a file is opened in a different instance of excel, it will not show up in the VBA project window of the other instance. _
+If you copypaste between them, you will get paste options more akin to pasting from a web browser or word doc. _
+In windows task manager, you should see 2 different version of the excel application running. In general AVOID _
+doing multiple instances of excel.
+
+'So what does this have to do with using scripts to open and close excel files? Different instances make things _
+more complicated and require a separate script. _
+Typically, if you wanted to close all of the excel files, you would loop through excels premade collection of workbooks _
+and just save and close each one. However, this collection of workbooks only contains all workooks under the instance of _
+excel which the calling script belongs to. Inorder to close excel files open under other instances of scripts, you first _
+have to search the computer for each instance of excel, and then close each of those files.
+
+'Currently, this script starts by using the easy way and looking through each file in the current instance. It then _
+checks for multple instances. It is done this way to avoid a weird situation that occurs when using the script that _
+closes by instance of excel. Currently, the script will close the files, but will still leave any VBA projects open in _
+the project window. This is not an issue for non-macro enable files. Looking at the source below, there has never _
+really been a great solution to it. Further refinements of the script might solve it but right now its an issue. _
+In any case, unless you are opening hundereds of files, it should be fine.
+
+'https://answers.microsoft.com/en-us/msoffice/forum/all/workbooks-not-being-removed-from-vbaproject-window/af63ef9d-c247-4a98-8909-b0e9c92bce26
+
+
+'####INCLUDE IN MAIN SCRIPTS
+'//////////////////should save and close all open workbooks\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+'So the regular script would only close workbooks in a single instance of excel. This one searches the computer for all _
+instances of excel and saves/closes them. Sometimes I find it ends up closing this workbook too
+
+Name_SourceBook = ActiveWorkbook.Name 'Change this to the workbook Name you don't want closed
+
+
+
+Msg_DoIt = MsgBox("Would you like to save and close all open workbook excluding this one?", vbYesNo, "Save and close?")
+If Msg_DoIt <> vbYes Then: Exit Sub
+
+'####### Section 1: Closing All files under the current Instance of Excel ########################
+For Each Wrkbook In Workbooks
+    If Wrkbook.Name <> Name_SourceBook Then
+        'Wrkbook.Save
+        Wrkbook.Close True
+    End If
+Next
+
+'############ Section 2: Finding Excel Instances and Closing Files within them ##############
+
+'#### This should close all instances
+'Came From https://stackoverflow.com/questions/30363748/having-multiple-excel-instances-launched-how-can-i-get-the-application-object-f
+Dim xl As Application
+Dim guid&(0 To 3), acc As Object, hwnd, hwnd2, hwnd3
+guid(0) = &H20400
+guid(1) = &H0
+guid(2) = &HC0
+guid(3) = &H46000000
+
+Set GetExcelInstances = New Collection 'Creating a collection of open excel instances
+Do
+    hwnd = FindWindowExA(0, hwnd, "XLMAIN", vbNullString)
+    If hwnd = 0 Then: Exit Do
+    hwnd2 = FindWindowExA(hwnd, 0, "XLDESK", vbNullString)
+    hwnd3 = FindWindowExA(hwnd2, 0, "EXCEL7", vbNullString)
+    If AccessibleObjectFromWindow(hwnd3, &HFFFFFFF0, guid(0), acc) = 0 Then
+        GetExcelInstances.Add acc.Application
+    End If
+Loop
+'############ End of section from Website
+For Each xl In GetExcelInstances 'loop through excel instances
+    'Debug.Print "Handle: " & xl.ActiveWorkbook.FullName 'loop through workbooks in xcel instances
+    On Error GoTo Close_App
+    For Each Wrkbook In xl.Workbooks
+        If Current_Wrkbook_Count_Rep > 3 Then 'if it repeats the current workbook 3 times in a row, quit.
+            Exit For                          'Unsure if closing workbooks changes list in For each workbook, so a precaution
+        ElseIf Wrkbook.Name <> Name_SourceBook Then
+            'Debug.Print Wrkbook.Name
+            Wrkbook.Close True
+            Current_Wrkbook_Count_Rep = 0
+        Else
+            Current_Wrkbook_Count_Rep = Current_Wrkbook_Count_Rep + 1
+            Execl_Instance_Contains_Current = 1
+        End If
+    Next
+    If Execl_Instance_Contains_Current = 1 Then
+        Execl_Instance_Contains_Current = 0
+    Else
+Close_App:
+        On Error GoTo -1: On Error Resume Next
+        xl.Quit
+    End If
+Next
+
+Set GetExcelInstances = Nothing
+
+End Sub
+Sub AutoEmail_Copy_PrintArea_ToEmail()
+Dim Email_Code As Byte: Email_Code = 21
+Call AutoEmail_SendEmail(Email_Code)
+
+End Sub
+Sub AutoEmail_Copy_CurrentSelection_ToEmail()
+Dim Email_Code As Byte: Email_Code = 11
+Call AutoEmail_SendEmail(Email_Code)
+End Sub
+Sub AutoEmail_Attach_PDF_Of_PrintArea_ToEmail()
+Dim Email_Code As Byte: Email_Code = 23
+Call AutoEmail_SendEmail(Email_Code)
+End Sub
+Sub AutoEmail_Attach_Xlsx_Of_Selection_ToEmail()
+Dim Email_Code As Byte: Email_Code = 12
+Call AutoEmail_SendEmail(Email_Code)
+End Sub
+Sub AutoEmail_Attach_Xlsx_Of_PrintArea_ToEmail()
+Dim Email_Code As Byte: Email_Code = 22
+Call AutoEmail_SendEmail(Email_Code)
+End Sub
+Sub AutoEmail_SendEmail(Email_Code As Byte)
+'_______________________________ Send the Automated Email _________________________________________________
+'//////////////////////// This sub can auto generate an email with either a copy paste or attachemnt of  \\\\\\ _
+///////////////////// of current selection or print area. Can do PDF or xlsx, as well as direct copy paste. \\\\\ _
+'MIGHT NEED MICROSOFT WORD 16 OBJECT LIBRARY
+'NOTE: You can't set the variables as optional because when you do it doesn't pass them through for some reason
+'Input Variables: _
+'Variable Name: Email_Code
+        'Type: Byte
+        'Min Declaration Level: Calling sub
+        'Input Value: An email code value to indicate what operation to do
+        'Output Value: Same
+        'Description: the code is a two digit number. Here is what they mean: _
+            1st Digit: _
+                      1-Means use currently selected cells _
+                      2-Means use print area _
+            2nd Digit: _
+                      1-CopyPaste directly into email _
+                      2-CopyPaste to xlsx, Save that and attach it to email _
+                      3-export as PDF, attach to email (note: Can only use with print area (i.e. cannot be 13, only 23) _
+                      if you need to add more you can!
+
+
+'Steps: _
+    1. Create Email Object _
+    3. Create Body Text if any _
+    4. Add Attachments if any _
+    5. Send _
+'############################## Section 0: Intial Setup ################################################
+On Error GoTo Exit_Error_Generic1
+Err_Location = "Setting up auto emailer"
+Dim Range_CopyPaste As Range, Outlook_Object As Object, Outlook_Status As Byte
+'check operating system for slash. If not windows, uses other slash
+If Not Left(Application.OperatingSystem, 1) Like "W" Then
+    Var_Slash = "/"
+Else
+    Var_Slash = "\"
+End If
+Area_Type = Left(Email_Code, 1) + 0
+Deliver_Type = Right(Email_Code, 1) + 0
+'## Determine what the operation is
+If Area_Type = 2 Then 'if using print area
+    On Error GoTo Exit_NoPrintArea
+    Adr_CopyPaste = ActiveSheet.PageSetup.PrintArea
+Else 'if using current selection
+    On Error GoTo Exit_NoSelection
+    Adr_CopyPaste = Selection.Address
+End If
+
+Adr_CopyPaste = Split(Adr_CopyPaste, ",")
+'## Deliver operations
+
+
+'############################## Section 1: Create File For attaching If Applicable ####################
+If Deliver_Type = 2 Or Deliver_Type = 3 Then
+    If Deliver_Type = 3 Then: Extension_1 = "*.pdf": Title_1 = "PDF Files" 'if pdf. Don't worry about xlsx, the sub default will handle it
+    Call FileSaveAs(FileName_2, FilePath_2, Title_1, Extension_1)
+'Getting File Name
+    If FileName_2 = Empty Or FilePath_2 = Empty Then: Exit Sub 'If error or user cancels
+    'checking for and correcting any file extension issues
+    If Deliver_Type = 3 Then
+        If UCase(Right(FileName_2, 4)) <> ".PDF" Then 'if they don't have .PDF at the end, corrects issue
+            FileName_2 = Split(FileName_2, ".")(0) & ".PDF"
+        End If
+    ElseIf Deliver_Type = 2 Then
+        If FileName_2 Like "*.xls*" Then 'if they don't have .xls style format at the end, corrects issue
+        Else
+            FileName_2 = Split(FileName_2, ".")(0) & ".xlsx"
+        End If
+    End If
+    If Right(FilePath_2, 1) <> Var_Slash Then: FilePath_2 = FilePath_2 & Var_Slash
+    FullPath_Destination = FilePath_2 & FileName_2
+End If
+'############################## Section 2: Create Email Object #######################################
+
+Err_Location = "creating an email"
+On Error Resume Next
+
+'Set Outlook_Object = New Outlook.Application
+Application.StatusBar = "Create Email Object. If frozen, just wait one min"
+Adr_CopyPaste = Split(Adr_CopyPaste, ",")
+Call AutoEmail_Get_Outlook_Object(Outlook_Object, Outlook_Status)
+If Outlook_Status = -1 Then: GoTo Exit_Error_NoOutlook
+If Outlook_Status = 0 Then: GoTo Exit_Error_Generic2
+On Error GoTo Exit_Error_Generic1
+Set Email_Object = Outlook_Object.CreateItem(olMailItem)
+
+'############## Part 2.1: Copying and Attaching ###################
+'Outlook does not preserve the signature for some reason. You have to open a fresh email, display it, take the signature then close it.
+'From: https://stackoverflow.com/questions/22233264/inserting-signature-into-outlook-email-from-excel-vba
+'I found something in the URL below that replaces .display with .GetInspector. Same outcome but no display so faster
+
+Application.StatusBar = "Populating the Email"
+
+With Email_Object
+  ' Trick to preserve Outlook default signature
+  ' MailItem need to be displayed to be "fully created" as object (maybe VBA bug)
+  Err_Location = "perserving the signature on the email"
+  .GetInspector
+  HTMLBody = .HTMLBody
+  ' --- Trick to split HTMLBody into Head and Signature ---
+  ' Search for the position of the tag before signature
+  bodyTag = "<body" 'HTML for the body
+  PosBody = InStr(HTMLBody, bodyTag)
+  pTag = "<o:p>"
+  PosSignature = InStr(PosBody, HTMLBody, pTag)
+    
+    'Ok so this here saves the head and the signture, then removes them from the email. I Found if you don't _
+    the email will start one line down from the top. if you clear the HTML body it fixes it, but deletes and User _
+    custom font stuff
+  Head = Left(HTMLBody, PosSignature - 1)
+  Signature = Right(HTMLBody, Len(HTMLBody) - PosSignature + 1)
+  .HTMLBody = Replace(HTMLBody, Signature, "") 'My modded Line
+    'This section is where things get either copied in or attached
+    On Error GoTo Exit_Error_Generic1
+    If Deliver_Type = 2 Or Deliver_Type = 3 Then 'If exporting to file
+        If Deliver_Type = 3 Then 'exporting a PDF file
+            Err_Location = "creating PDF for email"
+            Name_Wrkbook = ActiveWorkbook.Name: Name_Wrksht = ActiveSheet.Name
+            Call EmailSub_Print_Area_ToPDF(Name_Wrkbook, Name_Wrksht, FullPath_Destination)
+        Else
+            Err_Location = "creating excel file for email"
+            Call For_Ribbon_CopyPaste_PrintArea_NewWorkbook_WithAutosave(FullPath_Destination, Adr_CopyPaste, SkipAutoSave)
+            On Error GoTo Exit_Error_Generic1
+            If SkipAutoSave = 2 Then
+                MsgBox "The excel file was created but could not be saved. You may do with it as you see fit"
+            ElseIf SkipAutoSave = 4 Then
+                MsgBox "The excel file could not be properly populated. Please try again."
+                GoTo Exit_Range
+            End If
+        End If
+        .Attachments.Add FullPath_Destination
+    Else 'Copy Paste to email directly
+        Err_Location = "copying and pasting range to the email"
+        Stuff_For_Email = AdrtoHTML(Adr_CopyPaste)
+        If Stuff_For_Email = "ERROR" Then: GoTo Exit_Error_Generic1
+        .HTMLBody = .HTMLBody & Stuff_For_Email
+Exit_Range:
+    End If
+    'Putting the signature back in
+    .HTMLBody = Head & .HTMLBody & Signature
+End With
+
+'Set Email_Object = Outlook_Object.CreateItem(olMailItem)
+
+Application.EnableEvents = False
+Application.ScreenUpdating = False
+
+'########### Sending the Email ################
+'This has a separate section for automatically sending the email.
+'You will notice that first it displays the email, then it automatically sends. WHY? Here is why:
+'So far as I can tell, you CAN send the email automatically without displaying it IFF the email addresses _
+ are entered perfectly. This means no user names and no email groups, as those appear to only be converted _
+ to useable addresses AFTER the email is displayed. Weird.
+Email_Object.Display
+If Toggle_AutoEmail = 1 Then 'If you want to auto send
+    Email_Object.Send
+    If Sending_Multi_By_Looping <> 1 Then
+        MsgBox "                Email Sent!"
+    End If
+End If
+
+If 1 = 2 Then
+Exit_Error_Generic2:
+    On Error GoTo 0
+    MsgBox "There was an error when " & Err_Location & vbNewLine & vbNewLine & _
+           "Note: If you were sitting for like 15-30 seconds before the error came up, " & _
+           "Then its an ongoing problem with the Outlook registration in Windows. " & _
+           "I have found going to File->Exit in outlook fixes this problem", vbExclamation
+ElseIf 1 = 2 Then
+Exit_Error_NoOutlook:
+    On Error GoTo 0
+    MsgBox "Unfortunately, this program could not find a copy of the outlook application on your computer. You will " & _
+           "have to install it for this to work.", vbOKOnly, "No Outlook Application"
+ElseIf 1 = 2 Then
+Exit_Error_Generic1:
+    MsgBox "Unfortunately there was an error when " & Err_Location
+    On Error GoTo -1: On Error Resume Next
+    Email_Object.Display
+ElseIf 1 = 2 Then
+Exit_NoPrintArea:
+    On Error GoTo -1: On Error Resume Next
+    MsgBox "There is no print range setup for the current sheet. You have to manually set one first" & _
+           " for excel to recognize it"
+ElseIf 1 = 2 Then
+Exit_NoSelection:
+    On Error GoTo -1: On Error Resume Next
+    MsgBox "There is currently no cells selected on the active worksheet. Please select the cells and try again."
+ElseIf SkipAutoSave = 3 Then
+    MsgBox "The excel file was created and attached properly BUTTTTT it could not be saved where you wanted. " & _
+           "Instead, it is saved at :" & vbNewLine & vbNewLine & FullPath_Destination, vbOKOnly + vbInformation, "Not Saved Properly"
+End If
+
+Application.EnableEvents = True
+Application.ScreenUpdating = True
+Application.StatusBar = False
+Set oScript = Nothing
+Set Email_Object = Nothing
+Set Outlook_Object = Nothing
+
+End Sub
+Private Sub EmailSub_Print_Area_ToPDF(Name_Wrkbook, Name_Wrksht, FullPath_Destination, Optional FileType As Byte = xlTypePDF, Optional DontUsePrintArea As Byte = False, Optional OpenNewFile As Byte = False)
+'________________ Printing Print Area to PDF or XPS __________________________________________
+'/////////// This is designed to allow the user to create a PDF or XPS from a worksheet \\\\\\\\\ _
+///////////  (or Print area) in a file. Based off of .ExportAsFixedFormat. Full documentation \\\\ _
+/////// Here: https://learn.microsoft.com/en-us/office/vba/api/Excel.Workbook.ExportAsFixedFormat
+'Notes 1: Built in error text but no error catching. That should be done in the calling script _
+'Notes 2: CURRENTLY NO FILE VERIFICATION. This does not verify the file name you have inputted, nor does it verify _
+          if the worksheet and/or print area exists. _
+'Notes 3: .ExportAsFixedFormat has other options you can specify. I have left them out for simplicity, but you can easily _
+          modify for them.
+'############ Input Variable
+   'Variable Name: Name_Workbook
+        'Type: String
+        'Min Declaration Level: Sub
+        'Input Value: The name of the workbook you are making the file from
+        'Output Value: Same
+        'Description: If the files are open in the same instance of excel then you just need the filename(Incl ext). _
+                      Otherwise, you need the full path (Incl Ext)
+    'Variable Name: Name_Worksheet
+        'Type: String
+        'Min Declaration Level: Sub
+        'Input Value: The name of the worksheet you are making the file from
+        'Output Value: Same as Input
+        'Description: See Input Value
+    'Variable Name: FullPath_Destination
+        'Type: String
+        'Min Declaration Level: Sub
+        'Input Value: The full path for the file you are creating
+        'Output Value: Same As input
+        'Description: So this is the full file path and file name and extension
+    'Variable Name: FileType
+        'Type: variable? not sure what to call it. like vbYes
+        'Min Declaration Level: Sub
+        'Input Value: Ethier xlTypePDF or xlTypeXPS depending on the file type you want
+        'Output Value: Same as Input
+        'Description: So you would set it like FileType=xlTypePDF. Excel knows what that means
+    'Variable Name: DontUsePrintArea
+        'Type: Byte
+        'Min Declaration Level: Sub
+        'Input Value: TRUE or FALSE (Default is False)
+        'Output Value: Same as input
+        'Description: Lets the script know whether to use the print area when making the file or the whole worksheet
+    'Variable Name: OpenNewFile
+        'Type: Byte
+        'Min Declaration Level: Sub
+        'Input Value: TRUE or FALSE (Default is False)
+        'Output Value: Same as input
+        'Description: Lets the script know whether to open the new file after it is completed or not.
+
+               
+Err_Location = "creating PDF." & vbNewLine & "It is likely that the name of the file you are trying " & _
+               "to create is the same name of file you currently have open (including file extension). You will have to close the file to " & _
+               "create a new one." & vbNewLine & vbNewLine & _
+               "If the aforementioned situation is not the issue, you can try again, or make it manually."
+ Workbooks(Name_Wrkbook).Worksheets(Name_Wrksht).ExportAsFixedFormat Type:=FileType, fileName:=FullPath_Destination _
+    , Quality:=xlQualityStandard, IncludeDocProperties:=False, IgnorePrintAreas:=DontUsePrintArea, OpenAfterPublish:=OpenNewFile
+    
+
+End Sub
+
+Function AdrtoHTML(Adr_CopyPaste)
+' By Ron de Bruin. Retrieved From:https://stackoverflow.com/questions/18663127/paste-excel-range-in-outlook
+'######### This takes the given range, pastes it to a new workbook, saves it and returns it as an HTML object _
+            so that it can be put into an email. For some reason I can just copy and paste a range into an email,
+            'but not with VBA. Very Silly.
+    Dim fso As Object
+    Dim ts As Object
+    Dim TempFile As String
+    Dim TempWB As Workbook
+
+    TempFile = Environ$("temp") & "/" & Format(Now, "dd-mm-yy h-mm-ss") & ".htm"
+
+    'Copy the range and create a new workbook to past the data in
+    Name_Wrkbook = ActiveWorkbook.Name: Name_Wrksht = ActiveSheet.Name
+    Set TempWB = Workbooks.Add(1)
+    RowNum_Paste = 1: ColNum_Paste = 1
+    On Error GoTo Exit_Error
+    With TempWB.Sheets(1)
+        For i = LBound(Adr_CopyPaste) To UBound(Adr_CopyPaste)
+            Set Range_CopyPaste = Workbooks(Name_Wrkbook).Worksheets(Name_Wrksht).Range(Adr_CopyPaste(i))
+            If i > LBound(Adr_CopyPaste) Then
+                Set Range_PreviousPaste = Workbooks(Name_Wrkbook).Worksheets(Name_Wrksht).Range(Adr_CopyPaste(i - 1))
+                If Range_PreviousPaste.Columns(1).Column = Range_CopyPaste.Columns(1).Column Then 'If both ranges in same column, paste to next row
+                    RowNum_Paste = RowNum_Paste + Range_PreviousPaste.Rows.Count
+                Else
+                    ColNum_Paste = ColNum_Paste + Range_PreviousPaste.Columns.Count
+                End If
+            End If
+            Range_CopyPaste.Copy
+            .Cells(RowNum_Paste, ColNum_Paste).PasteSpecial Paste:=8
+            .Cells(RowNum_Paste, ColNum_Paste).PasteSpecial xlPasteValues, , False, False
+            .Cells(RowNum_Paste, ColNum_Paste).PasteSpecial xlPasteFormats, , False, False
+            .Cells(RowNum_Paste, ColNum_Paste).Select
+            Application.CutCopyMode = False
+            On Error Resume Next
+            .DrawingObjects.Visible = True
+            .DrawingObjects.Delete
+            On Error GoTo Exit_Error
+        Next i
+    End With
+
+    'Publish the sheet to a htm file
+    With TempWB.PublishObjects.Add( _
+         SourceType:=xlSourceRange, _
+         fileName:=TempFile, _
+         Sheet:=TempWB.Sheets(1).Name, _
+         Source:=TempWB.Sheets(1).UsedRange.Address, _
+         HtmlType:=xlHtmlStatic)
+        .Publish (True)
+    End With
+
+    'Read all data from the htm file into RangetoHTML
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set ts = fso.GetFile(TempFile).OpenAsTextStream(1, -2)
+    AdrtoHTML = ts.ReadAll
+    ts.Close
+    AdrtoHTML = Replace(AdrtoHTML, "align=center x:publishsource=", _
+                          "align=left x:publishsource=")
+
+    'Close TempWB
+If 1 = 2 Then
+Exit_Error:
+On Error GoTo 0
+    AdrtoHTML = "ERROR"
+End If
+    TempWB.Close SaveChanges:=False
+
+    'Delete the htm file we used in this function
+    Kill TempFile
+
+    Set ts = Nothing
+    Set fso = Nothing
+    Set TempWB = Nothing
+End Function
+Private Sub AutoEmail_Get_Outlook_Object(Outlook_Object As Object, Optional Outlook_Status As Byte = 0)
+'based on code by ZVI - MrExcelMVP
+'https://www.mrexcel.com/board/threads/getobject-not-getting-outlook-application.1033082/
+'_________________________ Creating an Outlook Object ________________________________________________
+'////////////////// This has several methods of testing that outlook exists and is open \\\\\\\\\\\\\\\\\\\\ _
+///////////////// as it can be very finicky to try and grab it. Will send back Outlook object\\\\\\\\\\\\\\\\ _
+'The main purpose of this is for you to obtain an outlook application object so then you can run scripits through outlook _
+ Essentially, this trys to get an open outlook object, and if it cannot find one, it opens a new one. _
+ The script is a little bit more roundabout then you might expect as I have had issues attaching to open outlook _
+ as well as creating new outlook applications and closing them properly.
+ 'NOTE: So alot of this has to do with the problem mentioned in the link above. I was having this issue myself intermittently. _
+       So far I have been able to locate one cause (though it may not be the only one). Everymorning TaskScheduler would _
+       Open my main organization file for me, and from there I would open all of my workbooks. When I do stuff this way I would, _
+       have the issue. If I do everything the same but DON'T use task manager and instead open it manually, it works.
+'############ Input Variable #####################
+   'Variable Name: Outlook_Object
+        'Type: Object
+        'Min Declaration Level: Sub
+        'Input Value: Unset Object
+        'Output Value: Either an Outlook application object OR the same unset object
+        'Description: Just pass the declared object through, and if this works it should come back with _
+                      an outlook application object. If outlook is not open, will open it
+    'Variable Name: Outlook_Status
+        'Type: byte
+        'Min Declaration Level: N/A
+        'Input Value: Empty Byte Variable. Can just leave blank
+        'Output Value: -1, 0 or 1
+        'Description: If -1, means outlook not installed on computer. If 0, means outlook is installed but _
+                      VBA could not create an outlook object. If 1, means the outlook object created
+
+
+Dim oScript     As Object
+Dim OutLookPath As String
+Dim TaskID      As Double
+
+On Error Resume Next
+
+Set Outlook_Object = GetObject(, "Outlook.Application")
+If Err Then
+    On Error GoTo -1
+    On Error Resume Next
+    Set oScript = CreateObject("Wscript.Shell")
+    OutLookPath = oScript.RegRead("HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\" & "OUTLOOK.EXE" & "\")
+    If Err Then
+        Outlook_Status = -1
+        Set oScript = Nothing
+        'MsgBox "Outlook.exe is not found in this system"
+        Exit Sub
+    End If
+    TaskID = VBA.Shell(OutLookPath, vbNormalFocus)
+    'So this little do loop is to delay the script while outlook opens. I was having issues where the outlook object _
+    would not be set because outlook had not opend yet. This should delay enough to fix that. You can add more seconds if _
+    desired, just make sure they don't take longer than the counter_ticks (the fail safe if your computer is slow) _
+    I have found that 10000 ticks~2 seconds. I print both to the immediate window so you can see what ends first
+    End_Time = Time() + TimeSerial(0, 0, 10) 'can adjust the wait time if desired
+    Do While Outlook_Object <> "Outlook"
+        Set Outlook_Object = GetObject(, "Outlook.Application")
+        Counter_Ticks = Counter_Ticks + 1
+        If Time() >= End_Time Then
+            Debug.Print Time() & "; " & End_Time & " Ticks: " & Counter_Ticks
+            MsgBox "Outlook does not appear to open. If it actually did and just took a while, try running the script again. It should work. Also, ignore the error messages after this"
+            'NoOutlook = 1
+            Exit Do
+        End If
+    Loop
+    Debug.Print Counter_Ticks
+    'If NoOutlook <> 1 Then: Set Outlook_Object = GetObject(, "Outlook.Application")
+
+End If
+
+On Error GoTo HELL
+    
+If (Not Outlook_Object Is Nothing) Then
+    'Call createEmail(row)
+    'Outlook_Object.Quit
+    Outlook_Status = 1 '//Some of my code first tests if Outlook is open and then performs tasks after, the rest do it up front and then tests.
+End If
+
+GETOUT:
+    Set oScript = Nothing
+    'Set Outlook_Object = Nothing
+    Exit Sub
+HELL:
+    'MsgBox "Error #: " & Err.Number & vbNewLine & vbNewLine & Err.Description & vbNewLine, vbCritical
+    Outlook_Status = -1
+    Resume GETOUT
+
+End Sub
+Private Sub For_Ribbon_CopyPaste_PrintArea_NewWorkbook_WithAutosave(FullPath_Destination, Adr_CopyPaste, SkipAutoSave)
+'_________________________ Copy the Print selected area to a new workbook_____________________________
+'//////////////////////////////////////////////////////\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\ _
+/////// This script selects the pre-setup print area on the current worksheet(from page break view) \\\\\\\\\\\\\\\\\\\ _
+////// and copys it to a new workbook created by the script. It is copied to the same columns as the \\\\\\\\\\\\\\\\\ _
+////// source print area, but the start row can be adjusted using a variable in this script (default=2) \\\\\\\\\\\\\\\\ _
+///// It also gives users the option to select a file save name an location, with checks on those.    \\\\\\\\\\\\\\\\\\ _
+///// This autosave feature can be turned off using a variable in this script, although there is a version \\\\\\\\\\\\\ _
+//// of this script which does not have autosave built in, which might be easier                        \\\\\\\\\\\\\\\\\ _
+//////////////////////////////////////////////////////\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+'******************************* General Properties and Quirks **********************************************************
+    'Can CopyPaste into new file?: Yes _
+        - Must be a module
+    'Can be used on Apple?: Yes, so long as SkipAutoSave is turned off (set to 1) _
+        -if there is a version of this script without autosave, use that instead
+'******************************* Input Variables *************************************************************************
+'FullPath_Destination=File Path and File Name including extension. Must be an excel file extension
+'Adr_CopyPaste=A list of addresses to copy and paste
+'SkipAutoSave=If you don't want to save the file, set to 1. Otherwise, don't set this variable _
+                If the file cannot be saved, comes back as a 2. If it cannot be saved where you want, as a 3. IF could not be populated, 4
+'********************************** Adjustable Features/Variables *******************************************************
+    '1. Row Height of Paste location _
+            Description: When you are pasting the print area to a new workbook, you can adjust the start row _
+            you are pasting it to. _
+            Varible to adjust: StartNum _
+            Possible Options: Any discrete number _
+            Location in Script: Just Before Part 1
+    '2. Toggle Autosave on or off. _
+        Description: This script has the ability to get a filename a save location from the user so the workbook _
+                     they paste into is already named and saved. This can be turned off, so the new workbook will _
+                     be 'book1' and the user will have to use the regular method of file saving to save it. _
+        Variable to Adjust: SkipAutoSave _
+        Possible Options: 1 or 0 (not 1) _
+        Option Outcomes: 1 will skip the autosave feature. Otherwise autosave will not be skipped _
+        Location in Script: Just Before Part 1
+'((((((((((((((((((((((((((((((((((((((((((((((((()))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+
+Application.EnableEvents = False
+Application.ScreenUpdating = False
+Application.Calculation = xlCalculationManual
+
+Dim Wrkbook_New As Workbook
+Name_Wrksht_Active = ActiveSheet.Name
+Name_Wrkbook_Host = ActiveWorkbook.Name
+RowNum_Paste = 2: ColNum_Paste = 2 'This is the row number you start your pasting to
+
+
+'----------------------------------- Part 1: Setting up New File ---------------------------------------------
+'################################### Section 1.1: Creating New File #############################################
+Set Wrkbook_New = Workbooks.Add
+
+'################################### Section 1.2: Paste Values #################################################
+ '### Get Print Area Range
+On Error GoTo KillTemp
+For i = LBound(Adr_CopyPaste) To UBound(Adr_CopyPaste) 'Loops through non-contiguous ranges to copy separatly. Excel cannot copy non-contiguous ranges apparently...
+    Set Range_Copy = Workbooks(Name_Wrkbook_Host).Worksheets(Name_Wrksht_Active).Range(Adr_CopyPaste(i))
+    If i > LBound(Adr_CopyPaste) Then
+        Set Range_PreviousPaste = Workbooks(Name_Wrkbook_Host).Worksheets(Name_Wrksht_Active).Range(Adr_CopyPaste(i - 1))
+        If Range_PreviousPaste.Columns(1).Column = Range_Copy.Columns(1).Column Then 'If both ranges in same column, paste to next row
+            RowNum_Paste = RowNum_Paste + Range_PreviousPaste.Rows.Count
+        Else
+            ColNum_Paste = ColNum_Paste + Range_PreviousPaste.Columns.Count
+        End If
+    End If
+    Set Range_Paste = Wrkbook_New.Worksheets(1).Range(Cells(RowNum_Paste, ColNum_Paste).Address)
+    Range_Copy.Copy
+    Range_Paste.PasteSpecial xlPasteAllUsingSourceTheme
+    'Range_Paste.PasteSpecial xlPasteFormats
+    'Range_Paste.PasteSpecial xlPasteValues
+    Range_Paste.PasteSpecial xlPasteColumnWidths
+    Set Range_Paste = Wrkbook_New.Worksheets(1).Range(Cells(RowNum_Paste, ColNum_Paste).Address & ":" & Cells(RowNum_Paste + Range_Copy.Rows.Count - 1, ColNum_Paste + Range_Copy.Columns.Count - 1).Address)
+    Range_Paste.Copy
+    Range_Paste.PasteSpecial xlPasteValues
+Next i
+Application.CutCopyMode = False
+'#Error Section
+On Error Resume Next
+Set NewSheet = Wrkbook_New.Worksheets(1)
+NewSheet.Name = Name_Wrksht_Active
+'################################### Section 2.3: Saving Workbook ##############################################
+If Skip_Auto_Save <> 1 Then
+    If Dir(FullPath_Destination) <> "" Then: Kill FullPath_Destination 'if file exists, delete so you can save new one
+    On Error GoTo Error_NoSave
+    Application.AlertBeforeOverwriting = False
+    Wrkbook_New.SaveAs FullPath_Destination
+    Application.AlertBeforeOverwriting = True
+    Wrkbook_New.Close
+    If 1 = 2 Then
+Error_NoSave:
+        On Error GoTo -1: On Error GoTo Exit_NoSave
+        Wrkbook_New.Save
+        FileName_2 = Wrkbook_New.Name
+        FilePath_2 = Wrkbook_New.path
+        FullPath_Destination = FilePath_2 & "\" & FileName_2
+        SkipAutoSave = 3
+        Wrkbook_New.Close
+    End If
+End If
+
+
+'////////////////////////////////////////////////////\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+
+If 1 = 2 Then
+Exit_Error_Generic:
+    On Error GoTo -1: On Error GoTo 0
+    MsgBox "Unfortunately there was an error when " & Err_Location & " If this issue persists, please contact the developer", vbOKOnly + vbInformation, "Error Occured"
+ElseIf 1 = 2 Then
+Exit_NoSave:
+    On Error GoTo -1: On Error GoTo 0
+    SkipAutoSave = 2
+ElseIf 1 = 2 Then
+KillTemp:
+    On Error GoTo -1: On Error GoTo 0
+    Wrkbook_New.Close SaveChanges:=False
+    SkipAutoSave = 4
+End If
+Exit_Normal:
+Set Wrkbook_New = Nothing
+Application.EnableEvents = True
+Application.ScreenUpdating = True
+Application.Calculation = xlCalculationAutomatic
+End Sub
+Private Sub FileSaveAs(FileName_2, FilePath_2, Title_1, Extension_1)
+'\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+'____________________________________ Save Current File as New one ____________________________________
+'////// This script will open up a window based on the current files location and allow the user to navigate anywhere and _
+////// save their file in the new location with a new name. This file then becomes the new one
+'////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+'************************************* General Properties and Quirks ***********************************************
+    'Can direct paste script into sub: Yes
+    'Can use on Apple: Yes
+    'Built in Error Handling: Goes to end of sub. Passes FileName_2 and FilePath_2 as Empty, so check for that when
+        'when building an error checker.
+    'User cancel handling: FileName_2 will equal "User Cancel".
+'*******************************************************************************************************************
+'(((((((((((((((((((((((((((((((((( Required Variables to Pass Through ))))))))))))))))))))))))))))))))))))))))))
+    'Variable Name: FileName_2
+        'Type: String
+        'Min Declaration Level: Sub
+        'Input Value: Not Required
+        'Output Value: User selected file name w/extension
+        'Description: This variable will store the name of the file selected by the user, including the extension,
+                      'and pass it through to the calling sub
+    'Variable Name: FilePath_2
+        'Type: String
+        'Min Declaration Level: Sub
+        'Input Value: Not Required
+        'Output Value: File path for file selected. DOES NOT INCLUDE SLASH AT THE END OF THE PATH
+        'Description: This variable will store the entire file path of the file selected by the user,
+                      'and pass it through to the calling sub
+    
+    'Variable Name: Title_1
+        'Type: String
+        'Min Declaration Level: Sub
+        'Input Value: Description of the type of files that can be selected
+            'Ex: "Excel Files"
+            'Note 1: If left blank, will default to the example. Useful if opening other excel files
+            'Note 2: For all Files, type "All"
+            'Note 3: This does not effect the types of visible files, it is only a handy reference for users
+        'Output: ""
+        'Description: (This will be hard to understand). Whenever a window opens up in Windows allowing you to select
+                    ' a file, at the bottom of the window is a line where the selected file name will display.
+                    'Beside this line is a little box/drop-down menu allowing you to select the types of files you
+                    'can see/select. Typically, it will show a name, followed by several extensions which represent
+                    'the extensions you can select. This sets the name shown while the previous variable (Extension_1)
+                    'sets the list of extensions in the box AND what you can actually see.
+                        'For example, when not specified, the default value for Extension_1 is "*.xlsx; *.xlsm; *.xls"
+                        'while the default value for Title_1 is "Excel Files". When the file selector opens up,
+                        ' the little box/drop-down menu will show "Excel Files (*.xlsx; *.xlsm; *.xls)". So setting
+                        'this variable (Title_1) just gives a description of the possible files in english rather than extension language.
+                        'You will understand once you play around with it. Maybe.
+    'Variable Name: Extension_1
+        'Type: String
+        'Min Declaration Level: SUb
+        'Input Value: A colon separated list of file extensions you want users to be able to choose from. Each must Start with ".*" _
+            Ex: "*.xlsb;*.xlsx"
+            'Note 1: If left blank, will default to the current files type
+        'Output: ""
+        'Description: Works along side Title 1. Gives the list of available file types to view
+'((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((()))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+'$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ Script to insert in your sub for calling and after call error checking $$$$$$$$$$$$$$$$
+
+'Title_1={Either 1-3 word Description of the types of files or "" for default (excel files)}
+'Call FileSaveAs(FileName_2, FilePath_2, Extension_1, Title_1)
+'If FileName_2="User Cancel" then
+    'Put in something here to exit probably
+'ElseIf FileName_2=Empty or FilePath_2=Empty then
+    'Dev Note: I have left a generic error handler which exits the script. You replace it with your own if desired
+    ' MsgBox "No File Chosen. Now exiting this subrountine"
+    'Application.EnableEvents=True
+    'Application.ScreenUpdating=True
+    'Exit Sub
+'End if
+'$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+'##################################################### Beginnig of Sub ###############################################
+
+Title_2 = "Save File As" 'Title that appears at the top of the dialog window
+On Error GoTo No_Selection
+'@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ Settable In Sub Options @@@@@@@@@@@@@@@@@@@@@@@@@@@
+'### Variable To Turn on/off self selection. Default is off (0)
+Self_Select = 0
+'@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+'##### Determining if computer is Windows or Apple (well, not windows actually but c'mon, linux will never see this)
+'      for backslash setting
+    'Windows uses \ in file paths, while Apple uses /. This checks the operating system and sets the slashes accordingly
+If Not Left(Application.OperatingSystem, 1) Like "W" Then
+    Var_Slash = "/"
+Else
+    Var_Slash = "\"
+End If
+'#################### Getting The Current File Name and Extension #####################################
+Name_Wrkbook_Active = ActiveSheet.Parent.Name
+
+'########################### Setting Up Title_1 and Extension_1 #####################################################
+'''''''' This checks to see if the user has set values for Title_1 and Extension_1. If not, sets default
+If Title_1 = Empty Then 'Dev Note: Cannot Handle if Title_1 is non-String for file selector
+    Title_1 = "Excel Files"
+End If
+If Extension_1 = Empty Then 'Dev Note: Cannot Handle if Title_1 is non-String for file selector
+    Extension_1 = "*.xlsx"
+ElseIf UBound(Split(Extension_1, "*")) < UBound(Split(Extension_1, ".")) _
+    Or UBound(Split(Extension_1, ".")) - 1 <> UBound(Split(Extension_1, ";")) Then 'error checking the extensions
+        Debug.Print "You forgot to setup the file extensions properly. Its '*.ex1;*.ex2' etc."
+        FileName_2 = Empty
+        FilePath_2 = Empty
+        GoTo Exit_1
+End If
+
+        
+'############################ Setting up and Executing the File Selector ###########################
+'### Setting up File Dialog Application
+If FilePath_2 = "" Then
+    'FilePath_2 = Replace(ThisWorkbook.Path, Split(ThisWorkbook.Path, Var_Slash)(UBound(Split(ThisWorkbook.Path, Var_Slash))), "")
+    FilePath_2 = ThisWorkbook.path & Var_Slash
+ElseIf Right(FilePath_2, 1) <> Var_Slash Then
+    FilePath_2 = FilePath_2 & Var_Slash
+End If
+If FileName_2 <> "" Then
+    If Right(FilePath_2, 1) = Var_Slash Then
+        FilePath_2 = FilePath_2 & FileName_2
+    Else
+        FilePath_2 = FilePath_2 & Var_Slash & FileName_2
+    End If
+End If
+
+Section_Execution:
+Dialog = Application.GetSaveAsFilename(InitialFileName:=FilePath_2, _
+                                          FileFilter:=Title_1 & "(" & Extension_1 & ")," & Extension_1, Title:=Title_2)
+
+    
+If Dialog = False Then
+User_Cancel:
+    FileName_2 = "User Cancel"
+    FilePath_2 = Empty
+    GoTo Exit_1
+No_Selection:
+    'Where it goes if there is a error. If no file is selected, setting FullPath_List throws and error, leads here
+    On Error GoTo -1
+    On Error GoTo Exit_1
+    FileName_2 = Empty
+    FilePath_2 = Empty
+    GoTo Exit_1
+Else
+    FullPath_List = Split(Dialog, Var_Slash) 'creates vector of file path and name seperated by /
+    FileName_2 = FullPath_List(UBound(FullPath_List)) 'pulls the file name from the list
+    FilePath_2 = Replace(Dialog, FileName_2, "") 'replaces the file name in the full path with a ""; tl/dr sets file path
+    If Self_Select = 0 Then  ' Little script to handle when users select the file this script is operating from
+        If FileName_2 = ThisWorkbook.Name And FilePath_2 = ThisWorkbook.path & Var_Slash Then
+        Self_Select_Msg = MsgBox("The file you have selected is this very file (" & FileName_2 & ")!" & vbNewLine & _
+                                "This is not currently allowed. Please click 'Ok' to select a different file, or click 'Cancel' to exit", _
+                                vbOKCancel + vbExclamation, "File Self Selection Error")
+            If Self_Select_Msg = vbOK Then
+                GoTo Section_Execution
+            Else
+                GoTo User_Cancel
+            End If
+        End If
+    End If
+End If
+
+
+Exit_1:
+End Sub
+
